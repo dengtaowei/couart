@@ -23,8 +23,10 @@ Clients never fight `TIOCEXCL` on copper.
 
 - UART RX is fanned out to every seat.
 - Writable seats fan in to the UART. Agent/MCP TX is also painted on
-  `console` as CRLF (display-only, not re-queued). `watch` stays on UART
-  RX only, so device echo is not doubled.
+  `console` with a `[agent] ` line prefix (display-only, not re-queued).
+  After UART RX (e.g. a shell prompt mid-line), the next paint starts with
+  CRLF so the prefix is not glued to the prompt. `watch` stays on UART RX
+  only, so device echo is not doubled.
 - `watch` never transmits.
 
 There is no kernel module. Policy (who writes, when the port is yielded)

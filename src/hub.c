@@ -44,6 +44,9 @@ static void fanout_rx(couart_hub_t *h, const uint8_t *data, size_t len, int skip
             continue;
         couart_seat_write(&h->seats[i], data, len);
     }
+    /* Console may now sit mid-line (prompt). Next agent paint should CRLF. */
+    if (len > 0)
+        h->paint_force_break = 1;
 }
 
 static void hist_add(couart_hub_t *h, const uint8_t *data, size_t len)
@@ -99,33 +102,76 @@ static void tx_lock_expire(couart_hub_t *h)
     }
 }
 
-/* Show the human console what agent/MCP sent. Do not paint watch/agent:
- * they already get UART RX, and U-Boot echo would double (hheellpp).
- * Skip when the typist is the console itself. */
+/* Show the human console what agent/MCP sent, with a line prefix so it is
+ * distinct from device echo (Linux shell) / avoids looking like a double.
+ * Do not paint watch/agent: they already get UART RX, and U-Boot echo would
+ * double (hheellpp). Skip when the typist is the console itself. */
+static const char k_paint_prefix[] = "[agent] ";
+
+static void paint_flush(couart_hub_t *h, uint8_t *out, size_t *o)
+{
+    if (!h || !out || !o || *o == 0)
+        return;
+    (void)couart_seat_write(&h->seats[COUART_SEAT_CONSOLE], out, *o);
+    *o = 0;
+}
+
+static void paint_reserve(couart_hub_t *h, uint8_t *out, size_t *o, size_t cap,
+                          size_t need)
+{
+    if (*o + need > cap)
+        paint_flush(h, out, o);
+}
+
 static void display_tx(couart_hub_t *h, const uint8_t *data, size_t len, int skip_seat)
 {
     if (skip_seat == COUART_SEAT_CONSOLE)
         return;
 
-    uint8_t out[COUART_TXFRAME * 2];
+    const size_t plen = sizeof(k_paint_prefix) - 1;
+    uint8_t out[COUART_TXFRAME * 3];
     size_t o = 0;
-    for (size_t i = 0; i < len && o + 2 <= sizeof(out); i++) {
+
+    for (size_t i = 0; i < len; i++) {
         uint8_t c = data[i];
+        int lone_cr = (c == '\r' && (i + 1 >= len || data[i + 1] != '\n'));
+        int emit_crlf = (c == '\n' || lone_cr);
+        /* Worst case this iteration: optional break+prefix, then 1–2 payload bytes. */
+        size_t need = emit_crlf ? 2 : 1;
+        if (h->paint_bol) {
+            need += plen;
+            if (h->paint_force_break)
+                need += 2;
+        }
+        paint_reserve(h, out, &o, sizeof(out), need);
+
+        if (h->paint_bol) {
+            if (h->paint_force_break) {
+                out[o++] = '\r';
+                out[o++] = '\n';
+                h->paint_force_break = 0;
+            }
+            memcpy(out + o, k_paint_prefix, plen);
+            o += plen;
+            h->paint_bol = 0;
+        }
+
         if (c == '\n') {
             if (o == 0 || out[o - 1] != '\r')
                 out[o++] = '\r';
             out[o++] = '\n';
+            h->paint_bol = 1;
         } else if (c == '\r') {
             out[o++] = '\r';
-            if (i + 1 >= len || data[i + 1] != '\n')
+            if (lone_cr) {
                 out[o++] = '\n';
+                h->paint_bol = 1;
+            }
         } else {
             out[o++] = c;
         }
     }
-    if (o == 0)
-        return;
-    couart_seat_write(&h->seats[COUART_SEAT_CONSOLE], out, o);
+    paint_flush(h, out, &o);
 }
 
 static void tx_drain(couart_hub_t *h)
@@ -598,6 +644,8 @@ int couart_hub_init(couart_hub_t *h, const char *name, const char *port, int bau
     memset(h, 0, sizeof(*h));
     h->epfd = h->listen_fd = h->wake_rd = h->wake_wr = -1;
     h->uart.fd = -1;
+    h->paint_bol = 1;
+    h->paint_force_break = 1; /* assume console may be mid-line until proven idle */
     for (int i = 0; i < COUART_CTL_MAX; i++)
         h->ctl[i].fd = -1;
     for (int i = 0; i < COUART_SEAT_COUNT; i++) {

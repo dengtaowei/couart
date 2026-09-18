@@ -81,6 +81,12 @@ typedef struct couart_hub {
     int suspended;
     int stop;
     int uart_online;
+    /* Next agent/MCP paint on console starts a new line → emit [agent] prefix. */
+    int paint_bol;
+    /* UART RX may have left the console mid-line (e.g. shell prompt); break
+     * before the next [agent] paint. Cleared after that break; not set by
+     * our own painted newlines (avoids blank lines in multi-line TX). */
+    int paint_force_break;
 } couart_hub_t;
 
 /* log */

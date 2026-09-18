@@ -168,8 +168,9 @@ static void test_write_shown_on_console(void)
     ASSERT(memcmp(buf, payload, 8) == 0, "WRITE payload is original bytes");
 
     n = read_wait(cons, buf, sizeof(buf), 50);
-    ASSERT(n >= 9, "console sees shared TX");
-    ASSERT(memcmp(buf, "via-ctl\r\n", 9) == 0, "display copy is CRLF");
+    ASSERT(n >= 19, "console sees shared TX");
+    ASSERT(memcmp(buf, "\r\n[agent] via-ctl\r\n", 19) == 0,
+           "display copy breaks then prefix + CRLF");
 
     usleep(40000);
     n = read(master, buf, sizeof(buf));
@@ -189,6 +190,49 @@ static void test_write_shown_on_console(void)
     ASSERT_INT_EQ(couart_hex_decode(hexline, raw, sizeof(raw), &rn), 0);
     ASSERT(rn >= 8, "history has TX bytes");
     ASSERT(memmem(raw, rn, payload, 8) != NULL, "history contains WRITE payload");
+
+    close(cons);
+    stop_hub(tid, master, slave);
+}
+
+static void test_write_multiline_paint(void)
+{
+    int master, slave;
+    ASSERT(openpty(&master, &slave, NULL, NULL, NULL) == 0, "openpty device");
+    char *slave_name = ttyname(slave);
+    ASSERT(slave_name != NULL, "ttyname");
+
+    char name[64];
+    snprintf(name, sizeof(name), "m%d", (int)getpid());
+    ASSERT_INT_EQ(couart_hub_init(&g_hub, name, slave_name, 115200), 0);
+    pthread_t tid;
+    ASSERT_INT_EQ(pthread_create(&tid, NULL, hub_thread, NULL), 0);
+    usleep(80000);
+
+    char console_path[COUART_PATH_MAX];
+    ASSERT_INT_EQ(couart_seat_path(console_path, sizeof(console_path), name, "console"), 0);
+    int cons = open(console_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    ASSERT(cons >= 0, "open console");
+
+    char buf[256];
+    while (read(cons, buf, sizeof(buf)) > 0)
+        ;
+
+    const char *payload = "a\nb\n";
+    char hex[32];
+    ASSERT_INT_EQ(couart_hex_encode((const uint8_t *)payload, 4, hex, sizeof(hex)), 0);
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "WRITE %s", hex);
+    char reply[128];
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "write ok");
+
+    ssize_t n = read_wait(cons, buf, sizeof(buf), 50);
+    /* One leading break (init force_break), then two prefixed lines — no blank
+     * line between them (force_break cleared after first paint line). */
+    const char *expect = "\r\n[agent] a\r\n[agent] b\r\n";
+    ASSERT(n >= (ssize_t)strlen(expect), "console sees multiline paint");
+    ASSERT(memcmp(buf, expect, strlen(expect)) == 0, "multiline prefix layout");
 
     close(cons);
     stop_hub(tid, master, slave);
@@ -268,6 +312,7 @@ int main(void)
     RUN_TEST(test_echo_filter);
     RUN_TEST(test_cr_not_eaten_when_raw);
     RUN_TEST(test_write_shown_on_console);
+    RUN_TEST(test_write_multiline_paint);
     RUN_TEST(test_foreign_openers);
     RUN_TEST(test_rebind);
     TEST_REPORT();
