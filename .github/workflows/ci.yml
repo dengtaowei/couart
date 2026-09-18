@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake gcc
+      - name: Configure and build
+        run: cmake -B build && cmake --build build -j$(nproc)
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

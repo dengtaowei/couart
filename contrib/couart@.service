@@ -1,0 +1,19 @@
+# Example user unit. Copy and set the port, then:
+#   systemctl --user enable --now couart@demo
+#
+# ~/.config/couart/demo.conf:
+#   COUART_PORT=/dev/ttyUSB1
+#   COUART_BAUD=115200
+
+[Unit]
+Description=couart serial hub (%i)
+
+[Service]
+Type=simple
+Environment=COUART_BAUD=115200
+EnvironmentFile=-%h/.config/couart/%i.conf
+ExecStart=/usr/local/bin/couart serve --name %i --port ${COUART_PORT} --baud ${COUART_BAUD} --foreground
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
