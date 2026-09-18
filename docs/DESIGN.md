@@ -22,7 +22,9 @@ Clients never fight `TIOCEXCL` on copper.
 ## Data flow
 
 - UART RX is fanned out to every seat.
-- Writable seats fan in to the UART. Seat TX is not mirrored to other seats.
+- Writable seats fan in to the UART. Agent/MCP TX is also painted on
+  `console` as CRLF (display-only, not re-queued). `watch` stays on UART
+  RX only, so device echo is not doubled.
 - `watch` never transmits.
 
 There is no kernel module. Policy (who writes, when the port is yielded)

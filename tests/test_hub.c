@@ -131,7 +131,7 @@ static void test_cr_not_eaten_when_raw(void)
     close(sl);
 }
 
-static void test_write_not_mirrored(void)
+static void test_write_shown_on_console(void)
 {
     int master, slave;
     ASSERT(openpty(&master, &slave, NULL, NULL, NULL) == 0, "openpty device");
@@ -150,6 +150,10 @@ static void test_write_not_mirrored(void)
     int cons = open(console_path, O_RDWR | O_NOCTTY | O_NONBLOCK);
     ASSERT(cons >= 0, "open console");
 
+    char buf[256];
+    while (read(cons, buf, sizeof(buf)) > 0)
+        ;
+
     const char *payload = "via-ctl\n";
     char hex[32];
     ASSERT_INT_EQ(couart_hex_encode((const uint8_t *)payload, 8, hex, sizeof(hex)), 0);
@@ -159,13 +163,32 @@ static void test_write_not_mirrored(void)
     ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
     ASSERT(strncmp(reply, "OK", 2) == 0, "write ok");
 
-    char buf[256];
     ssize_t n = read_wait(master, buf, sizeof(buf), 50);
     ASSERT(n >= 8, "device got WRITE");
-    ASSERT(memcmp(buf, payload, 8) == 0, "WRITE payload");
+    ASSERT(memcmp(buf, payload, 8) == 0, "WRITE payload is original bytes");
 
-    n = read(cons, buf, sizeof(buf));
-    ASSERT(n <= 0, "console must not see mirrored TX");
+    n = read_wait(cons, buf, sizeof(buf), 50);
+    ASSERT(n >= 9, "console sees shared TX");
+    ASSERT(memcmp(buf, "via-ctl\r\n", 9) == 0, "display copy is CRLF");
+
+    usleep(40000);
+    n = read(master, buf, sizeof(buf));
+    ASSERT(n <= 0, "display copy must not loop back onto the UART");
+
+    snprintf(cmd, sizeof(cmd), "HISTORY 64");
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "history ok");
+    char *nl = strchr(reply, '\n');
+    ASSERT(nl != NULL, "history header");
+    const char *hexline = nl + 1;
+    char *end = strchr(hexline, '\n');
+    if (end)
+        *end = '\0';
+    uint8_t raw[64];
+    size_t rn = 0;
+    ASSERT_INT_EQ(couart_hex_decode(hexline, raw, sizeof(raw), &rn), 0);
+    ASSERT(rn >= 8, "history has TX bytes");
+    ASSERT(memmem(raw, rn, payload, 8) != NULL, "history contains WRITE payload");
 
     close(cons);
     stop_hub(tid, master, slave);
@@ -244,7 +267,7 @@ int main(void)
     RUN_TEST(test_roundtrip);
     RUN_TEST(test_echo_filter);
     RUN_TEST(test_cr_not_eaten_when_raw);
-    RUN_TEST(test_write_not_mirrored);
+    RUN_TEST(test_write_shown_on_console);
     RUN_TEST(test_foreign_openers);
     RUN_TEST(test_rebind);
     TEST_REPORT();

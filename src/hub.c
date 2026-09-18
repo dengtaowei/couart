@@ -99,6 +99,35 @@ static void tx_lock_expire(couart_hub_t *h)
     }
 }
 
+/* Show the human console what agent/MCP sent. Do not paint watch/agent:
+ * they already get UART RX, and U-Boot echo would double (hheellpp).
+ * Skip when the typist is the console itself. */
+static void display_tx(couart_hub_t *h, const uint8_t *data, size_t len, int skip_seat)
+{
+    if (skip_seat == COUART_SEAT_CONSOLE)
+        return;
+
+    uint8_t out[COUART_TXFRAME * 2];
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 2 <= sizeof(out); i++) {
+        uint8_t c = data[i];
+        if (c == '\n') {
+            if (o == 0 || out[o - 1] != '\r')
+                out[o++] = '\r';
+            out[o++] = '\n';
+        } else if (c == '\r') {
+            out[o++] = '\r';
+            if (i + 1 >= len || data[i + 1] != '\n')
+                out[o++] = '\n';
+        } else {
+            out[o++] = c;
+        }
+    }
+    if (o == 0)
+        return;
+    couart_seat_write(&h->seats[COUART_SEAT_CONSOLE], out, o);
+}
+
 static void tx_drain(couart_hub_t *h)
 {
     while (h->txq_n > 0 && uart_online(h)) {
@@ -107,10 +136,8 @@ static void tx_drain(couart_hub_t *h)
         if (n < 0)
             break;
         if (n > 0) {
-            /* Do not mirror TX to seats. A raw PTY displays LF as
-             * "next line, same column", and ECHO would loop the bytes
-             * back onto the UART — that is how `md.b 0x0 0x20` split. */
             hist_add(h, f->data + f->off, (size_t)n);
+            display_tx(h, f->data + f->off, (size_t)n, f->skip_seat);
             f->off += (size_t)n;
         }
         if (f->off < f->len)

@@ -41,6 +41,7 @@ ctest --test-dir build --output-on-failure
 ./build/couart attach /dev/ttyUSB1 --name demo -b 115200
 ./build/couart list
 ./build/couart status demo
+./build/couart history demo
 
 # rebind device/baud without dropping WindTerm seats
 ./build/couart port demo /dev/ttyUSB0 --baud 115200

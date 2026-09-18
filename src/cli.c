@@ -1,4 +1,5 @@
 #include "couart.h"
+#include "hex.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -20,6 +21,7 @@ static void usage(FILE *fp)
         "USAGE:\n"
         "  couart attach <device> [--name NAME] [--baud RATE] [--foreground]\n"
         "  couart port <name> [<device>] [--baud RATE]\n"
+        "  couart history <name> [--last BYTES]\n"
         "  couart detach <name>\n"
         "  couart list\n"
         "  couart status <name>\n"
@@ -332,6 +334,87 @@ static int cmd_port(int argc, char **argv)
     return strncmp(reply, "OK", 2) == 0 ? 0 : 1;
 }
 
+static int cmd_history(int argc, char **argv)
+{
+    int last = 8192;
+    static const struct option opts[] = {
+        {"last", required_argument, NULL, 'l'},
+        {"help", no_argument, NULL, 'h'},
+        {NULL, 0, NULL, 0}
+    };
+    optind = 1;
+    int c;
+    while ((c = getopt_long(argc, argv, "l:h", opts, NULL)) != -1) {
+        switch (c) {
+        case 'l':
+            last = atoi(optarg);
+            break;
+        case 'h':
+            fprintf(stdout,
+                    "usage: couart history <name> [--last BYTES]\n"
+                    "  Print recent console TX + UART RX from the hub ring buffer.\n"
+                    "  Default --last is 8192, max %d.\n",
+                    (int)COUART_HIST_SIZE);
+            return 0;
+        default:
+            return 2;
+        }
+    }
+    if (optind >= argc) {
+        fprintf(stderr, "couart history: missing instance name\n");
+        return 2;
+    }
+    const char *name = argv[optind];
+    if (!couart_valid_name(name)) {
+        fprintf(stderr, "couart: invalid name '%s'\n", name);
+        return 2;
+    }
+    if (last <= 0 || last > (int)COUART_HIST_SIZE) {
+        fprintf(stderr, "couart history: --last must be 1..%d\n",
+                (int)COUART_HIST_SIZE);
+        return 2;
+    }
+
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "HISTORY %d", last);
+    size_t reply_n = (size_t)last * 2 + 128;
+    char *reply = malloc(reply_n);
+    if (!reply)
+        return 1;
+    if (couart_ctl_request(name, cmd, reply, reply_n, 2000) != 0) {
+        free(reply);
+        fprintf(stderr, "couart: instance '%s' is not running\n", name);
+        return 1;
+    }
+    if (strncmp(reply, "OK", 2) != 0) {
+        fputs(reply, stderr);
+        free(reply);
+        return 1;
+    }
+
+    char *nl = strchr(reply, '\n');
+    const char *hex = nl ? nl + 1 : "";
+    while (*hex == '\n' || *hex == '\r')
+        hex++;
+    char *end = strchr(hex, '\n');
+    if (end)
+        *end = '\0';
+
+    uint8_t *raw = malloc((size_t)last + 1);
+    size_t n = 0;
+    if (!raw || couart_hex_decode(hex, raw, (size_t)last, &n) != 0) {
+        free(raw);
+        free(reply);
+        fprintf(stderr, "couart history: bad hub reply\n");
+        return 1;
+    }
+    if (n > 0)
+        fwrite(raw, 1, n, stdout);
+    free(raw);
+    free(reply);
+    return 0;
+}
+
 static int cmd_ctl(const char *name, const char *cmd)
 {
     if (!couart_valid_name(name)) {
@@ -374,6 +457,8 @@ int couart_cli(int argc, char **argv)
         return cmd_attach(argc - 1, argv + 1);
     if (strcmp(cmd, "port") == 0 || strcmp(cmd, "bind") == 0)
         return cmd_port(argc - 1, argv + 1);
+    if (strcmp(cmd, "history") == 0 || strcmp(cmd, "hist") == 0)
+        return cmd_history(argc - 1, argv + 1);
     if (argc < 3) {
         fprintf(stderr, "couart %s: missing instance name\n", cmd);
         return 2;
