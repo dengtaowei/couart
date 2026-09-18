@@ -46,7 +46,7 @@ ctest --test-dir build --output-on-failure
 # rebind device/baud without dropping WindTerm seats
 ./build/couart port demo /dev/ttyUSB0 --baud 115200
 
-# yield the copper to a flasher
+# flasher needs /dev/ttyUSB1 itself
 ./build/couart suspend demo
 esptool.py --port /dev/ttyUSB1 write_flash ...
 ./build/couart resume demo
@@ -55,6 +55,13 @@ esptool.py --port /dev/ttyUSB1 write_flash ...
 ```
 
 You must be in the `dialout` (or equivalent) group to open the physical port.
+
+## Suspend / resume
+
+`suspend` when another program must open `/dev/ttyUSB*` (flasher, ISP).
+Seats stay; the board goes quiet. `resume` when that program exits,
+including cancel. Console and MCP do not need this. To change device or
+baud, use `port`, not suspend.
 
 ## MCP (AI agents)
 
