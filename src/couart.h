@@ -73,6 +73,10 @@ typedef struct couart_hub {
     int txq_rd;
     int txq_n;
     int tx_locked;
+    /* Non-zero while tx_locked. WRITE/TXUNLOCK must present this id so a
+     * second client cannot inject or drop the lock. 0 when unlocked. */
+    uint64_t tx_lock_id;
+    uint64_t tx_lock_seq;
     double tx_lock_until;
     int epfd;
     int listen_fd;

@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <pty.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -305,6 +306,60 @@ static void test_rebind(void)
     close(m2);
 }
 
+static void test_txlock_blocks_other_write(void)
+{
+    int master, slave;
+    ASSERT(openpty(&master, &slave, NULL, NULL, NULL) == 0, "openpty device");
+    char *slave_name = ttyname(slave);
+    ASSERT(slave_name != NULL, "ttyname");
+
+    char name[64];
+    snprintf(name, sizeof(name), "k%d", (int)getpid());
+    ASSERT_INT_EQ(couart_hub_init(&g_hub, name, slave_name, 115200), 0);
+    pthread_t tid;
+    ASSERT_INT_EQ(pthread_create(&tid, NULL, hub_thread, NULL), 0);
+    usleep(80000);
+
+    char reply[128];
+    ASSERT_INT_EQ(couart_ctl_request(name, "TXLOCK", reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "lock ok");
+    const char *idp = strstr(reply, "id=");
+    ASSERT(idp != NULL, "lock id");
+    unsigned long long id = strtoull(idp + 3, NULL, 10);
+    ASSERT(id != 0, "id non-zero");
+
+    const char *payload = "held\n";
+    char hex[32];
+    ASSERT_INT_EQ(couart_hex_encode((const uint8_t *)payload, 5, hex, sizeof(hex)), 0);
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "WRITE %s", hex);
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "ERR busy", 8) == 0, "bare WRITE rejected while locked");
+
+    snprintf(cmd, sizeof(cmd), "TXUNLOCK %llu", id + 9);
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "ERR busy", 8) == 0, "wrong id does not unlock");
+
+    snprintf(cmd, sizeof(cmd), "WRITE id=%llu %s", id, hex);
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "holder WRITE ok");
+
+    char buf[64];
+    ssize_t n = read_wait(master, buf, sizeof(buf), 50);
+    ASSERT(n >= 5, "device got holder WRITE");
+    ASSERT(memcmp(buf, payload, 5) == 0, "payload intact");
+
+    snprintf(cmd, sizeof(cmd), "TXUNLOCK %llu", id);
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "owner unlock");
+
+    snprintf(cmd, sizeof(cmd), "WRITE %s", hex);
+    ASSERT_INT_EQ(couart_ctl_request(name, cmd, reply, sizeof(reply), 1000), 0);
+    ASSERT(strncmp(reply, "OK", 2) == 0, "bare WRITE ok after unlock");
+
+    stop_hub(tid, master, slave);
+}
+
 int main(void)
 {
     printf("test_hub\n");
@@ -315,5 +370,6 @@ int main(void)
     RUN_TEST(test_write_multiline_paint);
     RUN_TEST(test_foreign_openers);
     RUN_TEST(test_rebind);
+    RUN_TEST(test_txlock_blocks_other_write);
     TEST_REPORT();
 }

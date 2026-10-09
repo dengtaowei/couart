@@ -90,6 +90,7 @@ static void tx_unlock(couart_hub_t *h)
     if (!h->tx_locked)
         return;
     h->tx_locked = 0;
+    h->tx_lock_id = 0;
     for (int i = 0; i < COUART_SEAT_COUNT; i++)
         seat_hold_flush(h, i);
 }
@@ -411,9 +412,25 @@ static void handle_line(couart_hub_t *h, int cidx, const char *line)
             }
         }
     } else if (strncmp(line, "WRITE ", 6) == 0) {
+        const char *hex = line + 6;
+        unsigned long long id = 0;
+        int have_id = 0;
+        /* "WRITE id=<n> <hex>" is the lock holder. Bare "WRITE <hex>" is
+         * only accepted while nobody holds the lock (tests, old clients). */
+        if (strncmp(hex, "id=", 3) == 0) {
+            char *end = NULL;
+            id = strtoull(hex + 3, &end, 10);
+            if (end && *end == ' ' && id != 0) {
+                have_id = 1;
+                hex = end + 1;
+            }
+        }
         uint8_t raw[4096];
         size_t n = 0;
-        if (couart_hex_decode(line + 6, raw, sizeof(raw), &n) != 0 || n == 0) {
+        tx_lock_expire(h);
+        if (h->tx_locked && (!have_id || id != h->tx_lock_id)) {
+            reply(fd, "ERR busy\n");
+        } else if (couart_hex_decode(hex, raw, sizeof(raw), &n) != 0 || n == 0) {
             reply(fd, "ERR bad hex\n");
         } else if (!uart_online(h)) {
             reply(fd, "ERR uart offline\n");
@@ -427,13 +444,29 @@ static void handle_line(couart_hub_t *h, int cidx, const char *line)
         if (h->tx_locked) {
             reply(fd, "ERR busy\n");
         } else {
+            if (h->tx_lock_seq == UINT64_MAX)
+                h->tx_lock_seq = 0;
+            h->tx_lock_seq++;
+            h->tx_lock_id = h->tx_lock_seq;
             h->tx_locked = 1;
             h->tx_lock_until = mono_now() + COUART_TXLOCK_S;
-            reply(fd, "OK locked\n");
+            dprintf(fd, "OK locked id=%llu\n",
+                    (unsigned long long)h->tx_lock_id);
         }
-    } else if (strcmp(line, "TXUNLOCK") == 0) {
-        tx_unlock(h);
-        reply(fd, "OK unlocked\n");
+    } else if (strncmp(line, "TXUNLOCK", 8) == 0 &&
+               (line[8] == '\0' || line[8] == ' ')) {
+        unsigned long long id = 0;
+        if (line[8] == ' ')
+            id = strtoull(line + 9, NULL, 10);
+        tx_lock_expire(h);
+        if (!h->tx_locked) {
+            reply(fd, "OK unlocked\n");
+        } else if (id != 0 && id == h->tx_lock_id) {
+            tx_unlock(h);
+            reply(fd, "OK unlocked\n");
+        } else {
+            reply(fd, "ERR busy\n");
+        }
     } else if (strcmp(line, "HISTORY") == 0 || strncmp(line, "HISTORY ", 8) == 0) {
         size_t want = 8192;
         if (strncmp(line, "HISTORY ", 8) == 0) {

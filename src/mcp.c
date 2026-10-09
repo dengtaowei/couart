@@ -127,39 +127,54 @@ static int history_text(char *out, size_t out_n, size_t want)
     return history_snap(out, out_n, want, NULL);
 }
 
-static int tx_lock(int timeout_ms)
+static int tx_lock(int timeout_ms, unsigned long long *id_out)
 {
     double t0 = now_ms();
     for (;;) {
         char reply[64];
         if (ctl("TXLOCK", reply, sizeof(reply), 1000) == 0 &&
-            strncmp(reply, "OK", 2) == 0)
+            strncmp(reply, "OK", 2) == 0) {
+            const char *p = strstr(reply, "id=");
+            unsigned long long id = 0;
+            if (p)
+                id = strtoull(p + 3, NULL, 10);
+            if (id == 0)
+                return -1;
+            if (id_out)
+                *id_out = id;
             return 0;
+        }
         if (now_ms() - t0 >= (double)timeout_ms)
             return -1;
         usleep(30000);
     }
 }
 
-static void tx_unlock(void)
+static void tx_unlock(unsigned long long id)
 {
+    char cmd[64];
     char reply[64];
-    (void)ctl("TXUNLOCK", reply, sizeof(reply), 1000);
+    snprintf(cmd, sizeof(cmd), "TXUNLOCK %llu", id);
+    (void)ctl(cmd, reply, sizeof(reply), 1000);
 }
 
-static int write_bytes(const uint8_t *data, size_t n)
+static int write_bytes(const uint8_t *data, size_t n, unsigned long long id)
 {
     char *hex = malloc(n * 2 + 1);
     if (!hex || couart_hex_encode(data, n, hex, n * 2 + 1) != 0) {
         free(hex);
         return -1;
     }
-    char *cmd = malloc(n * 2 + 8);
+    size_t cmd_n = n * 2 + 64;
+    char *cmd = malloc(cmd_n);
     if (!cmd) {
         free(hex);
         return -1;
     }
-    snprintf(cmd, n * 2 + 8, "WRITE %s", hex);
+    if (id)
+        snprintf(cmd, cmd_n, "WRITE id=%llu %s", id, hex);
+    else
+        snprintf(cmd, cmd_n, "WRITE %s", hex);
     char reply[128];
     int rc = ctl(cmd, reply, sizeof(reply), 1500);
     free(hex);
@@ -276,7 +291,9 @@ static void handle_tools_list(cJSON *id)
     req = cJSON_CreateArray();
     cJSON_AddItemToArray(req, cJSON_CreateString("data"));
     cJSON_AddItemToArray(tools, make_tool(
-        "serial_write", "Write raw bytes without waiting.", p_w, req));
+        "serial_write",
+        "Raw bytes only (firmware/binary). Refuses a blob that contains more than one line of text. Shell commands go through serial_send_command, one line at a time; set expect_pattern when the prompt is not boot>.",
+        p_w, req));
 
     cJSON_AddItemToArray(tools, make_tool(
         "serial_read", "Read recent UART output from the hub history.",
@@ -365,13 +382,14 @@ static char *tool_send_command(cJSON *args)
     if (timeout_ms > 120000)
         timeout_ms = 120000;
 
-    if (tx_lock(timeout_ms) != 0)
+    unsigned long long lock_id = 0;
+    if (tx_lock(timeout_ms, &lock_id) != 0)
         return strdup("ERR tx busy (another command in flight)");
 
     uint64_t seq0 = 0;
     char snap[COUART_HIST_SIZE + 1];
     if (history_snap(snap, sizeof(snap), 256, &seq0) < 0) {
-        tx_unlock();
+        tx_unlock(lock_id);
         return strdup("ERR hub not reachable — is couart attached?");
     }
 
@@ -381,14 +399,14 @@ static char *tool_send_command(cJSON *args)
     size_t n = clen + 1;
     uint8_t *raw = malloc(n);
     if (!raw) {
-        tx_unlock();
+        tx_unlock(lock_id);
         return strdup("ERR oom");
     }
     memcpy(raw, command, clen);
     raw[clen] = '\r';
-    if (write_bytes(raw, n) != 0) {
+    if (write_bytes(raw, n, lock_id) != 0) {
         free(raw);
-        tx_unlock();
+        tx_unlock(lock_id);
         return strdup("ERR write failed (uart offline?)");
     }
     free(raw);
@@ -429,7 +447,7 @@ static char *tool_send_command(cJSON *args)
         }
         usleep(50000);
     }
-    tx_unlock();
+    tx_unlock(lock_id);
     return result;
 }
 
@@ -456,6 +474,31 @@ static char *tool_wait_for(cJSON *args)
     }
 }
 
+/* A multi-line printable blob is a shell script, not a binary transfer.
+ * U-Boot (and similar) will drop characters if those lines are not paced
+ * on the prompt. Single-line and any payload with a non-text byte pass. */
+static int write_is_multiline_text(const char *data)
+{
+    int lines = 0;
+    int in_line = 0;
+
+    for (const unsigned char *p = (const unsigned char *)data; *p; p++) {
+        if (*p == '\r' || *p == '\n') {
+            if (in_line) {
+                lines++;
+                in_line = 0;
+            }
+            continue;
+        }
+        if (*p != '\t' && *p < 0x20)
+            return 0;
+        in_line = 1;
+    }
+    if (in_line)
+        lines++;
+    return lines >= 2;
+}
+
 static char *dispatch_tool(const char *name, cJSON *args)
 {
     char reply[4096];
@@ -470,8 +513,21 @@ static char *dispatch_tool(const char *name, cJSON *args)
         const char *data = arg_str(args, "data");
         if (!data)
             return strdup("ERR missing data");
-        if (write_bytes((const uint8_t *)data, strlen(data)) != 0)
+        if (write_is_multiline_text(data))
+            return strdup("ERR serial_write refuses multiple text lines. Use serial_send_command once per line (set expect_pattern if the prompt is not boot>).");
+        int timeout_ms = arg_int(args, "timeout_ms", 5000);
+        if (timeout_ms < 100)
+            timeout_ms = 100;
+        if (timeout_ms > 120000)
+            timeout_ms = 120000;
+        unsigned long long lock_id = 0;
+        if (tx_lock(timeout_ms, &lock_id) != 0)
+            return strdup("ERR tx busy (another command in flight)");
+        if (write_bytes((const uint8_t *)data, strlen(data), lock_id) != 0) {
+            tx_unlock(lock_id);
             return strdup("ERR write failed");
+        }
+        tx_unlock(lock_id);
         return strdup("OK");
     }
     if (strcmp(name, "serial_read") == 0 || strcmp(name, "serial_output_history") == 0) {

@@ -1,0 +1,10 @@
+---
+description: Send shell lines with serial_send_command, not serial_write
+alwaysApply: true
+---
+
+# Serial shell commands
+
+Use `serial_send_command` for one interactive command at a time. It waits for `boot>` unless `expect_pattern` is set (for example `root>`).
+
+`serial_write` is raw bytes for a binary transfer. Do not put multiple shell lines in it. Do not write the couart agent PTY directly.

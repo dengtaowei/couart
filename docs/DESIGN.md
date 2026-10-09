@@ -22,6 +22,14 @@ Clients never fight `TIOCEXCL` on copper.
 ## Data flow
 
 - UART RX is fanned out to every seat.
+- One TX lock covers every writer. `serial_send_command` holds it until the
+  prompt (default `boot>`). `serial_write` holds it only while that blob is
+  queued, then releases it and does not wait. Console and agent keystrokes
+  stay parked for the hold. A `WRITE` without the lock id is rejected while
+  the lock is held, so a second client cannot splice bytes into an in-flight
+  transfer. Binary contents of `serial_write` are not paced or rewritten.
+  A payload of more than one line of text is rejected there; those lines
+  belong to `serial_send_command`.
 - Writable seats fan in to the UART. Agent/MCP TX is also painted on
   `console` with a `[agent] ` line prefix (display-only, not re-queued).
   After UART RX (e.g. a shell prompt mid-line), the next paint starts with
